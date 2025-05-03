@@ -53,10 +53,10 @@ class SONICLoader:
             },
         }
 
-    RETURN_TYPES = ("MODEL_SONIC","DTYPE")
+    RETURN_TYPES = ("MODEL_SONIC_MATTHEW","DTYPE")
     RETURN_NAMES = ("model","dtype")
     FUNCTION = "loader_main"
-    CATEGORY = "SONIC"
+    CATEGORY = "SONIC_MATTHEW"
 
     def loader_main(self, model, sonic_unet, ip_audio_scale, use_interframe, dtype):
 
@@ -125,7 +125,7 @@ class SONIC_PreData:
     RETURN_TYPES = ("SONIC_PREDATA",)
     RETURN_NAMES = ("data_dict", )
     FUNCTION = "sampler_main"
-    CATEGORY = "SONIC"
+    CATEGORY = "SONIC_MATTHEW"
 
     def sampler_main(self, clip_vision,vae, audio, image,weight_dtype, min_resolution,duration, expand_ratio):
         
@@ -238,7 +238,7 @@ class SONICSampler:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "model": ("MODEL_SONIC",),
+                "model": ("MODEL_SONIC_MATTHEW",),
                 "data_dict": ("SONIC_PREDATA",),  # {}
                 "seed": ("INT", {"default": 0, "min": 0, "max": MAX_SEED}),
                 "inference_steps": ("INT", {"default": 25, "min": 1, "max": 1024, "step": 1, "display": "number"}),
@@ -249,18 +249,18 @@ class SONICSampler:
     RETURN_TYPES = ("IMAGE", "FLOAT")
     RETURN_NAMES = ("image", "fps")
     FUNCTION = "sampler_main"
-    CATEGORY = "SONIC"
+    CATEGORY = "SONIC_MATTHEW"
 
     def sampler_main(self, model, data_dict, seed, inference_steps, dynamic_scale, fps):
 
         print("***********Start infer  ***********")
         # # 当前分配的 CUDA 内存
-        # current_memory = torch.cuda.memory_allocated()
-        # print(f"Current CUDA memory allocated: {current_memory / 1024**2} MB")
+        current_memory = torch.cuda.memory_allocated()
+        print(f"Current CUDA memory allocated: {current_memory / 1024**2} MB")
 
         # # 历史最大分配的 CUDA 内存
-        # max_memory = torch.cuda.max_memory_allocated()
-        # print(f"Max CUDA memory allocated: {max_memory / 1024**2} MB")
+        max_memory = torch.cuda.max_memory_allocated()
+        print(f"Max CUDA memory allocated: {max_memory / 1024**2} MB")
 
         iamge = model.process(data_dict["audio_tensor_list"],
                               data_dict["uncond_audio_tensor_list"],
@@ -277,7 +277,7 @@ class SONICSampler:
                               )
         gc.collect()
         torch.cuda.empty_cache()
-        return (iamge.permute(0, 2, 3, 4, 1).squeeze(0), fps)
+        return iamge.permute(0, 2, 3, 4, 1).squeeze(0), fps
 
 
 NODE_CLASS_MAPPINGS = {

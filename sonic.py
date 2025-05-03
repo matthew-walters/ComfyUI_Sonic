@@ -15,13 +15,13 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def sonic_predata(wav_enc,audio_feature,audio_len,step,audio2bucket,image_encoder,audio_pe,ref_img,clip_img,device,weight_dtype):
- 
+
     image_embeds=image_encoder.encode_image(clip_img)["image_embeds"] #torch.Size([1, 1024])
 
     if device!=torch.device("cpu"):
         image_embeds=image_embeds.clone().detach().to(device, dtype=weight_dtype) # mps or cuda
     else:
-        image_embeds=image_embeds.to(device, dtype=weight_dtype) 
+        image_embeds=image_embeds.to(device, dtype=weight_dtype)
 
     audio_prompts = []
     last_audio_prompts = []
@@ -66,7 +66,7 @@ def sonic_predata(wav_enc,audio_feature,audio_len,step,audio2bucket,image_encode
 
 
 def preprocess_face(face_image,face_det, expand_ratio=1.0):
-        
+
         h, w = face_image.shape[:2]
         _, _, bboxes = face_det(face_image, maxface=True)
         face_num = len(bboxes)
@@ -93,7 +93,7 @@ def decode_latents_(latents,vae,device, decode_chunk_size=14):
 
         latents = 1 / 0.18215 * latents
         vae.device = device
-        
+
         # forward_vae_fn = self.vae._orig_mod.forward if is_compiled_module(self.vae) else self.vae.forward
         # accepts_num_frames = "num_frames" in set(inspect.signature(forward_vae_fn).parameters.keys())
 
@@ -181,8 +181,8 @@ def test(
 
 
 class Sonic():
-   
-    def __init__(self, 
+
+    def __init__(self,
                  device,
                  weight_dtype,
                  vae_config,
@@ -221,34 +221,73 @@ class Sonic():
         print('init done')
 
 
-    @torch.no_grad()
-    def process(self,
-                audio_tensor_list,
-                uncond_audio_tensor_list,
-                motion_buckets,
-                test_data,
-                config,
-                image_embeds,
-                img_latent,
-                fps,
-                vae,
-                inference_steps=25,
-                dynamic_scale=1.0,
-                seed=None):
-        
-        # specific parameters
-        if seed:
-            config.seed = seed
+@torch.no_grad()
+def process(self,
+            audio_tensor_list,
+            uncond_audio_tensor_list,
+            motion_buckets,
+            test_data,
+            config,
+            image_embeds,
+            img_latent,
+            fps,
+            vae,
+            inference_steps=25,
+            dynamic_scale=1.0,
+            seed=None,
+            batch_size=10,  # Make batch_size a parameter
+            monitor_memory=True):  # Add memory monitoring option
 
-        config.num_inference_steps = inference_steps
-        config.motion_bucket_scale = dynamic_scale
-        seed_everything(config.seed)
-       
-        height, width = test_data['ref_img'].shape[-2:]
-        #self.pipe.enable_model_cpu_offload #太慢，没意义
-        self.pipe.to(self.device)
-        
-        
+    # specific parameters
+    if seed:
+        config.seed = seed
+
+    config.num_inference_steps = inference_steps
+    config.motion_bucket_scale = dynamic_scale
+    seed_everything(config.seed)
+
+    height, width = test_data['ref_img'].shape[-2:]
+    self.pipe.to(self.device)
+
+    # Memory monitoring function
+    def get_gpu_memory_usage():
+        if not torch.cuda.is_available():
+            return 0, 0
+
+        # Get current memory usage
+        current = torch.cuda.memory_allocated() / (1024 ** 3)  # Convert to GB
+
+        # Get max memory usage
+        max_mem = torch.cuda.max_memory_allocated() / (1024 ** 3)  # Convert to GB
+
+        # Get total memory
+        total = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)  # Convert to GB
+
+        return current, max_mem, total
+
+    # Log memory status
+    def log_memory(stage=""):
+        if not monitor_memory:
+            return
+
+        current, peak, total = get_gpu_memory_usage()
+        print(f"Memory usage {stage}: Current: {current:.2f}GB, Peak: {peak:.2f}GB, Total Available: {total:.2f}GB")
+
+        # Calculate remaining headroom
+        headroom = total - peak
+
+        # Provide batch size recommendation
+        if stage == "after batch processing":
+            if headroom > 4.0:  # More than 4GB headroom
+                print(f"Memory headroom is large ({headroom:.2f}GB). Consider increasing batch_size to {batch_size*2}.")
+            elif headroom < 1.0:  # Less than 1GB headroom
+                print(f"Memory headroom is small ({headroom:.2f}GB). Consider decreasing batch_size to {max(1, batch_size//2)}.")
+            else:
+                print(f"Memory headroom is good ({headroom:.2f}GB). Current batch_size of {batch_size} seems appropriate.")
+
+        # Log initial memory state
+        log_memory("before processing")
+
         video = test(
             self.pipe,
             config,
@@ -263,21 +302,79 @@ class Sonic():
             img_latent=img_latent,
             vae=vae,
             device=self.device
-            )
+        )
+
+        log_memory("after initial generation")
 
         if self.use_interframe:
             rife = self.rife
             out = video.to(self.device)
-            results = []
+
+            # Process frames in smaller batches to save memory
             video_len = out.shape[2]
-            for idx in tqdm(range(video_len-1), ncols=0):
-                I1 = out[:, :, idx]
-                I2 = out[:, :, idx+1]
-                middle = rife.inference(I1, I2).clamp(0, 1).detach()
-                results.append(out[:, :, idx])
-                results.append(middle)
-            results.append(out[:, :, video_len-1])
-            video = torch.stack(results, 2).cpu()
-         
+
+            print(f"Processing {video_len} frames with batch size {batch_size}")
+
+            # Initialize tensor list for storing the final video
+            final_video_frames = []
+
+            # Track max and min memory usage during processing
+            max_memory_used = 0
+            min_memory_free = float('inf')
+
+            for batch_start in tqdm(range(0, video_len-1, batch_size), desc="Processing batches"):
+                batch_end = min(batch_start + batch_size, video_len-1)
+                batch_frames = batch_end - batch_start
+
+                log_memory(f"before batch {batch_start}-{batch_end}")
+
+                # Process each frame in the batch
+                for idx in range(batch_start, batch_end):
+                    I1 = out[:, :, idx]
+                    I2 = out[:, :, idx+1]
+                    middle = rife.inference(I1, I2).clamp(0, 1).detach()
+
+                    # Add the original frame and interpolated frame directly to final list
+                    final_video_frames.append(out[:, :, idx].clone().cpu())
+                    final_video_frames.append(middle.clone().cpu())
+
+                    # Free up GPU memory after each frame
+                    del middle
+                    torch.cuda.empty_cache()
+
+                # Check memory after each batch
+                if monitor_memory:
+                    current, peak, total = get_gpu_memory_usage()
+                    max_memory_used = max(max_memory_used, peak)
+                    min_memory_free = min(min_memory_free, total - peak)
+
+                    # Detailed batch info
+                    print(f"Batch {batch_start}-{batch_end} ({batch_frames} frames): "
+                          f"Memory used: {current:.2f}GB, Free: {total-current:.2f}GB")
+
+            # Add the last frame
+            final_video_frames.append(out[:, :, video_len-1].clone().cpu())
+
+            log_memory("after all batches")
+
+            # Overall batch processing stats
+            if monitor_memory:
+                print(f"\nBatch Processing Summary:")
+                print(f"Max memory used: {max_memory_used:.2f}GB")
+                print(f"Min memory free: {min_memory_free:.2f}GB")
+
+            # Stack all frames at once
+            video = torch.stack(final_video_frames, dim=2)
+
+            log_memory("after final stack")
+
+            # Final recommendation
+            log_memory("after batch processing")
+
+            # Clean up
+            del final_video_frames, out
+            torch.cuda.empty_cache()
+
+        log_memory("end of processing")
+
         return video
-        
