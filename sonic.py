@@ -221,71 +221,89 @@ class Sonic():
         print('init done')
 
 
-@torch.no_grad()
-def process(self,
-            audio_tensor_list,
-            uncond_audio_tensor_list,
-            motion_buckets,
-            test_data,
-            config,
-            image_embeds,
-            img_latent,
-            fps,
-            vae,
-            inference_steps=25,
-            dynamic_scale=1.0,
-            seed=None,
-            batch_size=10,  # Make batch_size a parameter
-            monitor_memory=True):  # Add memory monitoring option
+    @torch.no_grad()
+    def process(self,
+                audio_tensor_list,
+                uncond_audio_tensor_list,
+                motion_buckets,
+                test_data,
+                config,
+                image_embeds,
+                img_latent,
+                fps,
+                vae,
+                inference_steps=25,
+                dynamic_scale=1.0,
+                seed=None,
+                batch_size=500,  # Make batch_size a parameter
+                monitor_memory=True):  # Add memory monitoring option
+        print("in process method")
+        # specific parameters
+        if seed:
+            config.seed = seed
 
-    # specific parameters
-    if seed:
-        config.seed = seed
+        config.num_inference_steps = inference_steps
+        config.motion_bucket_scale = dynamic_scale
+        seed_everything(config.seed)
 
-    config.num_inference_steps = inference_steps
-    config.motion_bucket_scale = dynamic_scale
-    seed_everything(config.seed)
+        height, width = test_data['ref_img'].shape[-2:]
+        self.pipe.to(self.device)
 
-    height, width = test_data['ref_img'].shape[-2:]
-    self.pipe.to(self.device)
+        def get_system_memory_usage():
+            """Get current system memory usage instead of GPU memory"""
+            import psutil
+            # Get current memory usage
+            process = psutil.Process(os.getpid())
+            current = process.memory_info().rss / (1024 ** 3)  # Convert to GB
 
-    # Memory monitoring function
-    def get_gpu_memory_usage():
-        if not torch.cuda.is_available():
-            return 0, 0
+            # Get system memory info
+            system_memory = psutil.virtual_memory()
+            total = system_memory.total / (1024 ** 3)  # Total memory in GB
+            available = system_memory.available / (1024 ** 3)  # Available memory in GB
 
-        # Get current memory usage
-        current = torch.cuda.memory_allocated() / (1024 ** 3)  # Convert to GB
+            return current, total - available, total  # current, used, total
+        # Memory monitoring function
+        def get_gpu_memory_usage():
+            if not torch.cuda.is_available():
+                return 0, 0
 
-        # Get max memory usage
-        max_mem = torch.cuda.max_memory_allocated() / (1024 ** 3)  # Convert to GB
+            # Get current memory usage
+            current = torch.cuda.memory_allocated() / (1024 ** 3)  # Convert to GB
 
-        # Get total memory
-        total = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)  # Convert to GB
+            # Get max memory usage
+            max_mem = torch.cuda.max_memory_allocated() / (1024 ** 3)  # Convert to GB
 
-        return current, max_mem, total
+            # Get total memory
+            total = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)  # Convert to GB
 
-    # Log memory status
-    def log_memory(stage=""):
-        if not monitor_memory:
-            return
+            return current, max_mem, total
 
-        current, peak, total = get_gpu_memory_usage()
-        print(f"Memory usage {stage}: Current: {current:.2f}GB, Peak: {peak:.2f}GB, Total Available: {total:.2f}GB")
+        # Log memory status
+        def log_memory(stage=""):
+            if not monitor_memory:
+                return
 
-        # Calculate remaining headroom
-        headroom = total - peak
+            current, peak, total = get_gpu_memory_usage()
+            print(f"VRAM usage {stage}: Current: {current:.2f}GB, Peak: {peak:.2f}GB, Total Available: {total:.2f}GB")
 
-        # Provide batch size recommendation
-        if stage == "after batch processing":
-            if headroom > 4.0:  # More than 4GB headroom
-                print(f"Memory headroom is large ({headroom:.2f}GB). Consider increasing batch_size to {batch_size*2}.")
-            elif headroom < 1.0:  # Less than 1GB headroom
-                print(f"Memory headroom is small ({headroom:.2f}GB). Consider decreasing batch_size to {max(1, batch_size//2)}.")
-            else:
-                print(f"Memory headroom is good ({headroom:.2f}GB). Current batch_size of {batch_size} seems appropriate.")
+            currentSystem, peakSystem, totalSystem = get_system_memory_usage()
+            print(f"System RAM usage {stage}: Current: {currentSystem:.2f}GB, Peak: {peakSystem:.2f}GB, Total Available: {totalSystem:.2f}GB")
+            headRoomSystem = totalSystem - peakSystem
+            # Calculate remaining headroom
+            headroom = total - peak
+            print(f"System memory headroom: {headRoomSystem:.2f}GB")
+            # Provide batch size recommendation
+            if stage == "after batch processing":
 
-        # Log initial memory state
+                if headroom > 4.0:  # More than 4GB headroom
+                    print(f"Memory headroom is large ({headroom:.2f}GB). Consider increasing batch_size to {batch_size*2}.")
+                elif headroom < 1.0:  # Less than 1GB headroom
+                    print(f"Memory headroom is small ({headroom:.2f}GB). Consider decreasing batch_size to {max(1, batch_size//2)}.")
+                else:
+                    print(f"Memory headroom is good ({headroom:.2f}GB). Current batch_size of {batch_size} seems appropriate.")
+
+
+    # Log initial memory state
         log_memory("before processing")
 
         video = test(
